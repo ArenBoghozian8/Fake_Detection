@@ -7,28 +7,44 @@ from rospy import ROSException
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Pose
+from new_detection_msgs.msg import CompiledMessage
+from new_detection_msgs.msg import Human
 import math
 
 
 global MyHumans
 global init_robot_pose
 global robot_pos_x, robot_pos_z, robot_pos_th
+image_arr = []
+
+human_msg_ = Human()
+compiled_msgs_ = CompiledMessage()
+
+#RosLaunch Parameters
+mission_number_ = rospy.get_param('~mission_number')
+robot_number_ = rospy.get_param('~robot_number#')
+
+#Config file dictinary
 MyHumans = yaml.load(open('human.yaml'))
-robot_pose = yaml.load(open('robot.yaml'))
-robot_pos_x = init_robot_pose['mission1']['1']['x']
-robot_pos_z = init_robot_pose['mission1']['1']['z']
-robot_pos_th = robot_pose['mission1']['1']['theta']
+init_robot_pose = yaml.load(open('robot.yaml'))
+
+robot_pos_x = init_robot_pose[str(mission_number_)][str(robot_number_)]['x']
+robot_pos_z = init_robot_pose[str(mission_number_)][str(robot_number_)]['z']
+robot_pos_th = init_robot_pose[str(mission_number_)][str(robot_number_)]['theta']
+
 
 def process():
   rospy.init_node('detection_calculation_node', anonymous=True)
+  pub = rospy.Publisher('sarwai_detection/custom_msgs_info', CompiledMessage, queue_size=100)
   rospy.Subscriber('robot4/odom', Odometry, Odometry_update)
   rospy.Subscriber('/robot4/camera/rgb/image_raw', Image, imageCallBack)
 
   rospy.spin()
 
+
 def Odometry_update(data):
   #Getting x and z change for robot
-  x = data.pose.pose.position.x robot_pose 
+  x = data.pose.pose.position.x
   z = data.pose.pose.position.z
 
   #Getting the Quaternion info
@@ -44,9 +60,18 @@ def Odometry_update(data):
   robot_pos_x = robot_pos_x + x
   robot_pos_z = robot_pos_z + z
   robot_pos_th = robot_pos_th + yE
-  
+
   #Searching for humans
-  find()
+  find(robot_pos_x, robot_pos_z, robot_pos_th)
+
+  #Msgs being set and released
+  compiled_msgs_.header.stamp = rospy.Time.now()
+  compiled_msgs_.img = image_arr[0]
+  compiled_msgs_.robot = robot_number_
+  compiled_msgs_.fov = init_robot_pose[str(mission_number_)][str(robot_number_)]['fov']
+  pub.publish(compiled_msgs_)
+  image_arr.pop(0)
+
 
 #Conversion Function 
 def quaternion_to_euler_angle(w, x, y, z):
@@ -54,37 +79,59 @@ def quaternion_to_euler_angle(w, x, y, z):
 
   t0 = +2.0 * (w * x + y * z)
   t1 = +1.0 - 2.0 * (x * x + ysqr)
-  X = math.degrees(math.atan2(t0, t1))
+  X = math.atan2(t0, t1)
 
   t2 = +2.0 * (w * y - z * x)
   t2 = +1.0 if t2 > +1.0 else t2
   t2 = -1.0 if t2 < -1.0 else t2
-  Y = math.degrees(math.asin(t2))
+  Y = math.asin(t2)
 
   t3 = +2.0 * (w * z + x * y)
   t4 = +1.0 - 2.0 * (ysqr + z * z)
-  Z = math.degrees(math.atan2(t3, t4))
+  Z = math.atan2(t3, t4)
 	
-	return X, Y, Z  
+  return X, Y, Z  
+
+
+def shift_points(RX,RZ,HX,HZ):
+	HX = HX - RX
+	HZ = HZ - RZ
+
+	return 0,0,HX,HZ
 
 
 def cartesian_to_polar_distance(x,z):
   return math.sqrt(x**2 + z**2)
+
 
 #returning rad
 def cartesian_to_polar_angle(x,z):
   return math.atan2(z/x)
 
 
+
 def imageCallBack(data):
-  print("ss")
+  image_arr.append(data.msg)
 
 
-def find():
+
+def find(RoboPosX, RoboPosZ, RoboPosTh):
   for i in range(0,291):
-    dist = math.sqrt( (robot_pose['1']['1']['x'] - MyHumans[str(i)]['x'])**2 + (robot_pose['1']['1']['y'] - MyHumans[str(i)['y']])**2 )
+    dist = math.sqrt( (RoboPosX - MyHumans[str(i)]['x'])**2 + (RoboPosZ - MyHumans[str(i)['z']])**2 )
     if dist <= 0.5:  #dof
-      print("Correct")
+    	rx,rz,hx,hz = shift_points(robot_pos_x,robot_pos_z, MyHumans[str(i)]['x'], MyHumans[str(i)]['z'])
+    	human_degree = math.degree(cartesian_to_polar_angle(hx, hz))
+    	robot_degree = math.degree(RoboPosTh)
+    	FOV_degree = math.degree(init_robot_pose[str(mission_number_)][str(robot_number_)]['fov'])/2.0		#field of view divided by two, relative to robot
+    	if (human_degree <= robot_degree + FOV_degree ) and (human_degree >= robot_degree - FOV_degree and (MyHumans[str(i)]['dclass'] != 2)):
+    		human_msg_.id = i
+    		human_msg_.dclass = int(MyHumans[str(i)]['dclass'])
+    		human_msg_.angleToRobot = int(cartesian_to_polar_angle(hx, hz))
+    		human_msg_.distanceToRobot = int(dist)
+    		compiled_msgs_.humans.append(human_msg_)
+        #compiled_msgs_.humanQueries.append(str(i))
+
+
 
 def main():
   process()
